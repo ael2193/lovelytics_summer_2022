@@ -1,5 +1,32 @@
 # Databricks notebook source
-df = spark.read.csv("/FileStore/tables/NY_workers_compensation.csv", header=True, inferSchema=True)
+import pandas as pd
+import requests
+
+# COMMAND ----------
+
+# Reading in workers compensation data from csv file uploaded in local file store.
+
+# df = spark.read.csv("/FileStore/tables/NY_workers_compensation.csv", header=True, inferSchema=True)
+
+# COMMAND ----------
+
+# Connecting to API using requests
+# r = requests.get('https://data.ny.gov/resource/jshw-gkgu.json')
+# workers_compensation = r.json()
+
+# COMMAND ----------
+
+# Reading csv directly from API using pandas
+df = pd.read_csv('https://data.ny.gov/resource/jshw-gkgu.csv')
+
+# COMMAND ----------
+
+# Converting pandas df to spark df
+spark_df = spark.createDataFrame(df)
+
+# COMMAND ----------
+
+spark_df.collect()
 
 # COMMAND ----------
 
