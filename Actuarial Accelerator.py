@@ -1,7 +1,5 @@
 # Databricks notebook source
-import pandas as pd
-import requests
-from pyspark.sql.types import *
+from sodapy import Socrata
 from pyspark.sql.functions import *
 
 # COMMAND ----------
@@ -14,6 +12,11 @@ from pyspark.sql.functions import *
 
 # COMMAND ----------
 
+# Writing spark_df created from local csv file to Delta table
+# spark_df_local_csv.write.mode('overwrite').format('delta').save('dbfs/user/jade.qiu@lovelytics.com/')
+
+# COMMAND ----------
+
 # Connecting to API using requests
 # r = requests.get('https://data.ny.gov/resource/jshw-gkgu.json')
 # r.status_code
@@ -21,18 +24,18 @@ from pyspark.sql.functions import *
 # COMMAND ----------
 
 # Using sodapy to call API. Returns json - adjust timeout and limit to control number of records returned.
-from sodapy import Socrata
 
-client = Socrata("data.ny.gov", None, timeout=5000000)
+api_token = ''
+client = Socrata("data.ny.gov", api_token, timeout=5000000)
 
 # Selected columns
-columns = 'accident_date', 'age_at_injury', 'average_weekly_wage', 'birth_year', 'carrier_name', 'claim_identifier', 'claim_injury_type', 'claim_type', 'closed_count', 'current_claim_status', 'gender', 'injured_in_county_name', 'wcio_cause_of_injury_code', 'wcio_cause_of_injury_desc', 'wcio_nature_of_injury_code', 'wcio_nature_of_injury_desc', 'wcio_pob_code', 'wcio_pob_desc', 'industry_code', 'industry_desc']
+columns = 'accident_date, ancr_date, age_at_injury, average_weekly_wage, birth_year, carrier_name, claim_identifier, claim_injury_type, claim_type, closed_count, current_claim_status, gender, injured_in_county_name, wcio_cause_of_injury_code, wcio_cause_of_injury_desc, wcio_nature_of_injury_code, wcio_nature_of_injury_desc, wcio_pob_code, wcio_pob_desc, industry_code, industry_desc'
 
-# First 2000 results, returned as JSON from API / converted to Python list of dictionaries by sodapy.
-results = client.get("jshw-gkgu", limit=2000, select = columns)
+# First 5,000,000 results (i.e. all results), returned as JSON from API / converted to Python list of dictionaries by sodapy.
+results = client.get("jshw-gkgu", limit = 5000000, select = columns)
 
-# Convert to pandas DataFrame
-spark_df = spark.createDataFrame(results)
+# Convert to spark DataFrame
+# spark_df = spark.createDataFrame(results)
 
 # COMMAND ----------
 
@@ -40,24 +43,37 @@ display(spark_df)
 
 # COMMAND ----------
 
-spark_df.count()
+# Changing column schemas
+
+spark_df = (spark_df
+            .withColumn("accident_date", regexp_replace(spark_df['accident_date'],"[A-Za-z]", " "))
+            .withColumn("accident_date",to_date("accident_date"))
+            .withColumn("ancr_date", regexp_replace(spark_df['ancr_date'],"[A-Za-z]", " "))
+            .withColumn("ancr_date",to_date("ancr_date"))
+            )
 
 # COMMAND ----------
 
-spark_df.
+display(spark_df)
 
 # COMMAND ----------
 
-selected_cols = ["Accident", "Accident Date", "Age at Injury", "Assembly date", "Attorney/Representative", "Average Weekly Wage", "Birth Year", "Carrier Name", "Carrier Type", "Claim Identifier", "Claim Injury Type", "Claim Type", "Closed Count", "County of Injury", "District Name", "Gender", "Medical Fee Region", "Occupational Disease", "WCIO Cause of Injury Description", "WCIO Nature of Injury Description", "WCIO Part Of Body Description", "Zip Code"]
-df_selected_cols = df.select(selected_cols)
+spark_df.na.drop().filter(spark_df.accident_date>=2000)
 
 # COMMAND ----------
 
-from pyspark.sql.functions import *
+display(spark_df)
 
-df_selected_cols = (df_selected_cols
-                    .withColumn("Accident Date",to_date("Accident Date", "MM/dd/yyyy"))
-                    .withColumn("Assembly date",to_date("Assembly Date", "MM/dd/yyyy"))
-                    )
+# COMMAND ----------
 
+spark_df.write.mode('overwrite').format('delta').save('dbfs/user/jade.qiu@lovelytics.com/')
 
+# COMMAND ----------
+
+table_name = 'workers_compensation_bronze_table'
+save_path = '/dbfs/dbfs/user/jade.qiu@lovelytics.com'
+spark.sql("CREATE TABLE " + table_name + " USING DELTA LOCATION '" + save_path + "'")
+
+# COMMAND ----------
+
+client.close()
