@@ -105,6 +105,10 @@ spark_df_silver = spark.read.format("delta").load('/user/jade.qiu@lovelytics.com
 
 # COMMAND ----------
 
+spark_df_silver.count()
+
+# COMMAND ----------
+
 display(spark_df_silver)
 
 # COMMAND ----------
@@ -120,7 +124,7 @@ spark_df_silver = (spark_df_silver
 
 # COMMAND ----------
 
-display(spark_df)
+display(spark_df_silver)
 
 # COMMAND ----------
 
