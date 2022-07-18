@@ -83,7 +83,7 @@ display(spark_df_update)
 
 # COMMAND ----------
 
-spark_df_update.write.format('delta').mode('overwrite').option('overwriteSchema', True).option("path", '/user/jade.qiu@lovelytics.com/bronze_table_update').saveAsTable("bronze_table_update")
+spark_df_update.write.format('delta').mode('overwrite').option("path", '/user/jade.qiu@lovelytics.com/bronze_table_update').saveAsTable("bronze_table_update")
 
 # COMMAND ----------
 
@@ -102,6 +102,10 @@ spark_df_update.write.format('delta').mode('overwrite').option('overwriteSchema'
 # COMMAND ----------
 
 spark_df_bronze = spark.read.format("delta").load('/user/jade.qiu@lovelytics.com/')
+
+# COMMAND ----------
+
+spark_df_silver = spark_df_bronze
 
 # COMMAND ----------
 
@@ -126,30 +130,33 @@ def string_to_date(date_string):
 
 date_columns = [col for col in spark_df_bronze.columns if 'date' in col]
 for col in date_columns:
-  spark_df_silver = spark_df_bronze.withColumn(col, string_to_date(col))
-  
-assert spark_df_silver.filter(spark_df_bronze.ancr_date.isNull()).count() == spark_df_silver.filter(spark_df_silver.ancr_date.isNull()).count()
+  spark_df_silver = spark_df_silver.withColumn(col, string_to_date(col))
 
 # COMMAND ----------
 
-display(spark_df_silver)
+assert spark_df_bronze.filter(spark_df_bronze.ancr_date.isNull()).count()  == spark_df_silver.filter(spark_df_silver.ancr_date.isNull()).count()
 
 # COMMAND ----------
 
-spark_df_silver = spark_df_silver.withColumn('days_btw_accident_and_claim_estd', 'ancr_date' - 'accident_date')
+spark_df_silver = spark_df_silver.withColumn('report_lag', spark_functions.datediff('ancr_date', 'accident_date'))
 
 # COMMAND ----------
 
-# Selecting more relevant columns for analysis
-selected_cols = ['accident_ind', 'accident_date', 'age_at_injury', 'ancr_date'
-assembly_date:date
-atty_rep_ind:string
-average_weekly_wage:double
-birth_year:integer
-c2_date:date
-c3_date:date
-carrier_name:string
-carrier_type:string
+display(spark_df_silver.filter(spark_df_silver.ancr_date.isNotNull()))
+
+# COMMAND ----------
+
+spark_df_silver.write.format('delta').mode('append').option("path", '/user/jade.qiu@lovelytics.com/silver_table').saveAsTable("silver_table")
+
+# COMMAND ----------
+
+display(spark.sql("SELECT * FROM silver_table"))
+
+# COMMAND ----------
+
+'''
+Selecting more relevant columns for analysis
+selected_cols = ['accident_ind', 'accident_date', 'age_at_injury', 'ancr_date', 'average_weekly_wage', 'carrier_name', 'carrier_type'
 claim_identifier:integer
 claim_injury_type:string
 claim_type:string
@@ -192,3 +199,4 @@ wcio_pob_code:integer
 wcio_pob_desc:string
 zip_code:string
 spark_df_silver = spark_df_silver.select()
+'''
