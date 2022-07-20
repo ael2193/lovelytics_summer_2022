@@ -5,13 +5,19 @@ import pyspark.sql.types as spark_type
 
 # COMMAND ----------
 
+# MAGIC %sql
+# MAGIC CREATE SCHEMA IF NOT EXISTS actuarial_accelerator;
+# MAGIC USE actuarial_accelerator
+
+# COMMAND ----------
+
 # Reading in workers compensation data from csv file uploaded in local file store.
-spark_df = spark.read.csv("/FileStore/tables/NY_workers_compensation.csv", header=True, inferSchema=True)
+spark_df_bronze = spark.read.csv("/FileStore/tables/NY_workers_compensation.csv", header=True, inferSchema=True)
 
 # COMMAND ----------
 
 # Checking number of records in spark df read from local csv
-spark_df.count()
+spark_df_bronze.count()
 
 # COMMAND ----------
 
@@ -20,12 +26,12 @@ def rename_col(col):
 
 # COMMAND ----------
 
-for col in spark_df.columns:
-  spark_df = spark_df.withColumnRenamed(col, rename_col(col))
+for col in spark_df_bronze.columns:
+  spark_df_bronze = spark_df_bronze.withColumnRenamed(col, rename_col(col))
 
 # COMMAND ----------
 
-spark_df = (spark_df.withColumnRenamed('accident', 'accident_ind')
+spark_df_bronze = (spark_df_bronze.withColumnRenamed('accident', 'accident_ind')
             .withColumnRenamed('attorney/representative', 'atty_rep_ind')
             .withColumnRenamed('c-2_date', 'c2_date')
             .withColumnRenamed('c-3_date', 'c3_date')
@@ -42,7 +48,7 @@ spark_df = (spark_df.withColumnRenamed('accident', 'accident_ind')
 # COMMAND ----------
 
 # Writing spark_df created from local csv file to Delta table
-spark_df.write.format('delta').mode('overwrite').option("path", '/user/jade.qiu@lovelytics.com/').saveAsTable("bronze_table")
+spark_df_bronze.write.format('delta').mode('overwrite').option("path", '/actuarial_accelerator/bronze_table').saveAsTable("bronze_table")
 
 # COMMAND ----------
 
@@ -83,7 +89,7 @@ display(spark_df_update)
 
 # COMMAND ----------
 
-spark_df_update.write.format('delta').mode('overwrite').option("path", '/user/jade.qiu@lovelytics.com/bronze_table_update').saveAsTable("bronze_table_update")
+spark_df_update.write.format('delta').mode('overwrite').option("path", '/actuarial_accelerator/bronze_table_update').saveAsTable("bronze_table_update")
 
 # COMMAND ----------
 
@@ -101,10 +107,7 @@ spark_df_update.write.format('delta').mode('overwrite').option("path", '/user/ja
 
 # COMMAND ----------
 
-spark_df_bronze = spark.read.format("delta").load('/user/jade.qiu@lovelytics.com/')
-
-# COMMAND ----------
-
+# spark_df_silver = spark.read.format("delta").load('/actuarial_accelerator/silver_table')
 spark_df_silver = spark_df_bronze
 
 # COMMAND ----------
@@ -118,8 +121,8 @@ display(spark_df_silver)
 # COMMAND ----------
 
 # Helper function to change date column schemas from string to date
-def string_to_date(date_string):
-  r1 = spark_functions.regexp_replace(date_string, "[T]", " ")
+def string_to_date(date_string_column):
+  r1 = spark_functions.regexp_replace(date_string_column, "[T]", " ")
   r2 = spark_functions.regexp_replace(r1, "[-]", "/")
   r3 = spark_functions.to_date(r2, "MM/dd/yyyy")
   return r3
@@ -128,13 +131,13 @@ def string_to_date(date_string):
 
 # Change date column schemas from string to date
 
-date_columns = [col for col in spark_df_bronze.columns if 'date' in col]
+date_columns = [col for col in spark_df_silver.columns if 'date' in col]
 for col in date_columns:
   spark_df_silver = spark_df_silver.withColumn(col, string_to_date(col))
 
 # COMMAND ----------
 
-assert spark_df_bronze.filter(spark_df_bronze.ancr_date.isNull()).count()  == spark_df_silver.filter(spark_df_silver.ancr_date.isNull()).count()
+assert spark_df_bronze.filter(spark_df_bronze.ancr_date.isNull()).count()  == spark_df_bronze.filter(spark_df_bronze.ancr_date.isNull()).count()
 
 # COMMAND ----------
 
@@ -146,7 +149,59 @@ display(spark_df_silver.filter(spark_df_silver.ancr_date.isNotNull()))
 
 # COMMAND ----------
 
-spark_df_silver.write.format('delta').mode('append').option("path", '/user/jade.qiu@lovelytics.com/silver_table').saveAsTable("silver_table")
+# Helper function to recode body parts
+def body_part_recode(string):
+  hand = ['FINGER', 'SHOULDER', 'HAND', 'ARM', 'THUMB', 'ELBOW', 'WRIST']
+  face = ['EYE', 'HEAD', 'SKULL', 'FACE', 'FACIAL', 'EAR', 'NOSE', 'MOUTH', 'BRAIN', 'TEETH']
+  leg = ['KNEE', 'ANKLE', 'FOOT', 'LEG', 'TOE', 'BUTTOCKS', 'LOWER']
+  respiratory = ['LUNGS', 'LARYNX', 'SACRUM AND COCCYX', 'TRACHEA']
+  spinal = ['BACK', 'NECK', 'DISC', 'VERTEBRAE', 'SPINAL']
+  torso = ['CHEST', 'ABDOMEN', 'HIP', 'TRUNK', 'PELVIS', 'HEART']
+  multiple = ['MULTIPLE', 'WHOLE']
+  if any(x in string for x in hand):
+    return 'hand'
+  elif any(x in string for x in face):
+    return 'face'
+  elif any(x in string for x in leg):
+    return 'leg'
+  elif any(x in string for x in respiratory):
+    return 'respiratory'
+  elif any(x in string for x in spinal):
+    return 'spinal'
+  elif any(x in string for x in torso):
+    return 'torso'
+  elif any(x in string for x in multiple):
+    return 'multiple'
+  else:
+    return 'others'
+
+# COMMAND ----------
+
+body_part_recode_udf = udf(lambda x: body_part_recode(x) if not x is None else None , spark_type.StringType())
+
+# COMMAND ----------
+
+spark_df_silver = spark_df_silver.withColumn('injured_body_part', body_part_recode_udf(spark_functions.col('wcio_pob_desc')))
+
+# COMMAND ----------
+
+display(spark_df_silver.filter(spark_df_silver.wcio_pob_desc.isNotNull()))
+
+# COMMAND ----------
+
+from pyspark.mllib.random import RandomRDDs
+
+sc = ... # SparkContext
+
+# Generate a random double RDD that contains 1 million i.i.d. values drawn from the
+# standard normal distribution `N(0, 1)`, evenly distributed in 10 partitions.
+u = RandomRDDs.uniformRDD(sc, 1000000L, 10)
+# Apply a transform to get a random double RDD following `N(1, 4)`.
+v = u.map(lambda x: 1.0 + 2.0 * x)
+
+# COMMAND ----------
+
+spark_df_silver.write.format('delta').mode('overwrite').option("overwriteSchema", "true").option("path", '/actuarial_accelerator/silver_table').saveAsTable("silver_table")
 
 # COMMAND ----------
 
