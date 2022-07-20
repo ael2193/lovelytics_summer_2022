@@ -107,12 +107,7 @@ spark_df_update.write.format('delta').mode('overwrite').option("path", '/actuari
 
 # COMMAND ----------
 
-# spark_df_silver = spark.read.format("delta").load('/actuarial_accelerator/silver_table')
-spark_df_silver = spark_df_bronze
-
-# COMMAND ----------
-
-spark_df_silver.count()
+spark_df_silver = spark.read.format("delta").load('/actuarial_accelerator/silver_table')
 
 # COMMAND ----------
 
@@ -130,17 +125,18 @@ def string_to_date(date_string_column):
 # COMMAND ----------
 
 # Change date column schemas from string to date
-
 date_columns = [col for col in spark_df_silver.columns if 'date' in col]
 for col in date_columns:
   spark_df_silver = spark_df_silver.withColumn(col, string_to_date(col))
 
 # COMMAND ----------
 
+# Checking to make sure no records were turned to null during the string to date conversation
 assert spark_df_bronze.filter(spark_df_bronze.ancr_date.isNull()).count()  == spark_df_bronze.filter(spark_df_bronze.ancr_date.isNull()).count()
 
 # COMMAND ----------
 
+# Calculating report lag
 spark_df_silver = spark_df_silver.withColumn('report_lag', spark_functions.datediff('ancr_date', 'accident_date'))
 
 # COMMAND ----------
@@ -189,15 +185,12 @@ display(spark_df_silver.filter(spark_df_silver.wcio_pob_desc.isNotNull()))
 
 # COMMAND ----------
 
-from pyspark.mllib.random import RandomRDDs
+# Removing all claims that were labelled as cancelled - based on data dictionary, claims are marked as cancelled if assembled in error or determined to be a duplicate
+spark_df_silver = spark_df_silver.filter(spark_df_silver.claim_injury_type != '1. CANCELLED')
 
-sc = ... # SparkContext
+# COMMAND ----------
 
-# Generate a random double RDD that contains 1 million i.i.d. values drawn from the
-# standard normal distribution `N(0, 1)`, evenly distributed in 10 partitions.
-u = RandomRDDs.uniformRDD(sc, 1000000L, 10)
-# Apply a transform to get a random double RDD following `N(1, 4)`.
-v = u.map(lambda x: 1.0 + 2.0 * x)
+spark_df_silver.count()
 
 # COMMAND ----------
 
@@ -205,53 +198,36 @@ spark_df_silver.write.format('delta').mode('overwrite').option("overwriteSchema"
 
 # COMMAND ----------
 
-display(spark.sql("SELECT * FROM silver_table"))
+selected_cols = ['accident_date', 'ancr_date', 'age_at_injury', 'average_weekly_wage', 'carrier_name', 'carrier_type', 'claim_injury_type', 'claim_type', 'closed_count', 'injured_in_county_name', 'covid_19_indicator', 'current_claim_status', 'gender', 'industry_desc', 'report_lag', 'injured_body_part']
+spark_df_gold = spark_df_silver.select(selected_cols)
 
 # COMMAND ----------
 
-'''
-Selecting more relevant columns for analysis
-selected_cols = ['accident_ind', 'accident_date', 'age_at_injury', 'ancr_date', 'average_weekly_wage', 'carrier_name', 'carrier_type'
-claim_identifier:integer
-claim_injury_type:string
-claim_type:string
-closed_count:integer
-controverted_date:date
-injured_in_county_name:string
-covid_19_indicator:string
-current_claim_status:string
-district_name:string
-first_appeal_date:date
-first_hearing_date:date
-gender:string
-hearing_count:integer
-highest_process:string
-ime4_count:integer
-industry_code:integer
-industry_desc:string
-interval_assembled_to_ancr:integer
-medical_fee_region:string
-occupational_disease_ind:string
-oiics_event_exposure_code:string
-oiics_event_exposure_desc:string
-oiics_injury_source_code:string
-oiics_injury_source_desc:string
-oiics_nature_injury_code:string
-oiics_nature_injury_desc:string
-oiics_pob_code:string
-oiics_pob_desc:string
-oiics_secondary_source_code:string
-oiics_secondary_source_desc:string
-ppd_non_scheduled_loss_date:date
-ppd_scheduled_loss_date:date
-ptd_date:date
-section_32_date:date
-wcio_cause_of_injury_code:integer
-wcio_cause_of_injury_desc:string
-wcio_nature_of_injury_code:integer
-wcio_nature_of_injury_desc:string
-wcio_pob_code:integer
-wcio_pob_desc:string
-zip_code:string
-spark_df_silver = spark_df_silver.select()
-'''
+spark_df_gold = spark_df_gold.filter(spark_df_gold.accident_date > '2000-01-01')
+
+# COMMAND ----------
+
+spark_df_gold.write.format('delta').mode('overwrite').option("overwriteSchema", "true").option("path", '/actuarial_accelerator/gold_table').saveAsTable("gold_table")
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC SELECT COUNT (*) FROM gold_table
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC SELECT COUNT (*) as Claim_Count_YTD FROM gold_table WHERE ancr_date >= string(year(current_date))
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC WITH ytd_calc(count)
+# MAGIC   AS (SELECT COUNT (*) as Claim_Count_YTD FROM gold_table WHERE ancr_date >= '2022-01-01'),
+# MAGIC ytd_lastyear_calc(count)
+# MAGIC   AS (SELECT COUNT(*) as Claim_Count_Last_Year_YTD FROM gold_table WHERE ancr_date >= string(year(current_date) - 1)  AND ancr_date <= date_sub(current_date, 365))
+# MAGIC SELECT ytd_calc.count, ytd_lastyear_calc.count,  (ytd_calc.count) / ytd_lastyear_calc.count, (ytd_calc.count - ytd_lastyear_calc.count) / ytd_lastyear_calc.count FROM ytd_calc, ytd_lastyear_calc
+
+# COMMAND ----------
+
+
