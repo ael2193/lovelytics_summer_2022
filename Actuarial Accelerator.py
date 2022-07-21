@@ -190,7 +190,14 @@ spark_df_silver = spark_df_silver.filter(spark_df_silver.claim_injury_type != '1
 
 # COMMAND ----------
 
-spark_df_silver.count()
+spark_df_silver = spark_df_silver.withColumn('claim_open_or_closed', 
+                           spark_functions.when((spark_df_silver.closed_count == 0), 'open')
+                           .when((spark_df_silver.closed_count != 0), 'closed')
+                          )
+
+# COMMAND ----------
+
+display(spark_df_silver.filter(spark_df_silver.closed_count == 0))
 
 # COMMAND ----------
 
@@ -198,7 +205,7 @@ spark_df_silver.write.format('delta').mode('overwrite').option("overwriteSchema"
 
 # COMMAND ----------
 
-selected_cols = ['accident_date', 'ancr_date', 'age_at_injury', 'average_weekly_wage', 'carrier_name', 'carrier_type', 'claim_injury_type', 'claim_type', 'closed_count', 'injured_in_county_name', 'covid_19_indicator', 'current_claim_status', 'gender', 'industry_desc', 'report_lag', 'injured_body_part']
+selected_cols = ['accident_date', 'ancr_date', 'age_at_injury', 'average_weekly_wage', 'carrier_name', 'carrier_type', 'claim_injury_type', 'claim_type', 'injured_in_county_name', 'covid_19_indicator', 'current_claim_status', 'gender', 'industry_desc', 'report_lag', 'injured_body_part', 'claim_open_or_closed']
 spark_df_gold = spark_df_silver.select(selected_cols)
 
 # COMMAND ----------
@@ -227,7 +234,3 @@ spark_df_gold.write.format('delta').mode('overwrite').option("overwriteSchema", 
 # MAGIC ytd_lastyear_calc(count)
 # MAGIC   AS (SELECT COUNT(*) as Claim_Count_Last_Year_YTD FROM gold_table WHERE ancr_date >= string(year(current_date) - 1)  AND ancr_date <= date_sub(current_date, 365))
 # MAGIC SELECT ytd_calc.count, ytd_lastyear_calc.count,  (ytd_calc.count) / ytd_lastyear_calc.count, (ytd_calc.count - ytd_lastyear_calc.count) / ytd_lastyear_calc.count FROM ytd_calc, ytd_lastyear_calc
-
-# COMMAND ----------
-
-
