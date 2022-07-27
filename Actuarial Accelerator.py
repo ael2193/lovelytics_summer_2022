@@ -1,7 +1,7 @@
 # Databricks notebook source
-from sodapy import Socrata
-import pyspark.sql.functions as spark_functions
-import pyspark.sql.types as spark_type
+import pyspark.sql.functions as sql_functions
+import pyspark.sql.types as sql_type
+from pyspark.mllib import random
 
 # COMMAND ----------
 
@@ -66,6 +66,8 @@ limit 5000
 
 # Using sodapy to call API. Returns json - adjust timeout and limit to control number of records returned.
 
+from sodapy import Socrata
+
 api_token = None
 client = Socrata("data.ny.gov", api_token, timeout=5000000)
 
@@ -111,15 +113,16 @@ spark_df_silver = spark.read.format("delta").load('/actuarial_accelerator/silver
 
 # COMMAND ----------
 
-display(spark_df_silver)
+# Removing all claims that were labelled as cancelled - based on data dictionary, claims are marked as cancelled if assembled in error or determined to be a duplicate
+spark_df_silver = spark_df_silver.filter(spark_df_silver.claim_injury_type != '1. CANCELLED')
 
 # COMMAND ----------
 
 # Helper function to change date column schemas from string to date
 def string_to_date(date_string_column):
-  r1 = spark_functions.regexp_replace(date_string_column, "[T]", " ")
-  r2 = spark_functions.regexp_replace(r1, "[-]", "/")
-  r3 = spark_functions.to_date(r2, "MM/dd/yyyy")
+  r1 = sql_functions.regexp_replace(date_string_column, "[T]", " ")
+  r2 = sql_functions.regexp_replace(r1, "[-]", "/")
+  r3 = sql_functions.to_date(r2, "MM/dd/yyyy")
   return r3
 
 # COMMAND ----------
@@ -131,17 +134,8 @@ for col in date_columns:
 
 # COMMAND ----------
 
-# Checking to make sure no records were turned to null during the string to date conversation
-assert spark_df_bronze.filter(spark_df_bronze.ancr_date.isNull()).count()  == spark_df_bronze.filter(spark_df_bronze.ancr_date.isNull()).count()
-
-# COMMAND ----------
-
 # Calculating report lag
-spark_df_silver = spark_df_silver.withColumn('report_lag', spark_functions.datediff('ancr_date', 'accident_date'))
-
-# COMMAND ----------
-
-display(spark_df_silver.filter(spark_df_silver.ancr_date.isNotNull()))
+spark_df_silver = spark_df_silver.withColumn('report_lag', sql_functions.datediff('ancr_date', 'accident_date'))
 
 # COMMAND ----------
 
@@ -173,31 +167,83 @@ def body_part_recode(string):
 
 # COMMAND ----------
 
-body_part_recode_udf = udf(lambda x: body_part_recode(x) if not x is None else None , spark_type.StringType())
+body_part_recode_udf = udf(lambda x: body_part_recode(x) if not x is None else None, sql_type.StringType())
 
 # COMMAND ----------
 
-spark_df_silver = spark_df_silver.withColumn('injured_body_part', body_part_recode_udf(spark_functions.col('wcio_pob_desc')))
+spark_df_silver = spark_df_silver.withColumn('injured_body_part', body_part_recode_udf(sql_functions.col('wcio_pob_desc')))
 
 # COMMAND ----------
 
-display(spark_df_silver.filter(spark_df_silver.wcio_pob_desc.isNotNull()))
-
-# COMMAND ----------
-
-# Removing all claims that were labelled as cancelled - based on data dictionary, claims are marked as cancelled if assembled in error or determined to be a duplicate
-spark_df_silver = spark_df_silver.filter(spark_df_silver.claim_injury_type != '1. CANCELLED')
+to_remove = ['CO', 'COMPANY', 'pls', 'CORP', 'CORPORATION', 'DIST', 'DISTRICT', 'INC', 'SCH', 'CSD', 'OF', 'C S D', 'COR', 'INS', 'DT', 'CT', 'LLC']
+spark_df_silver = spark_df_silver.withColumn('carrier_name',  sql_functions.regexp_replace('carrier_name', '|'.join(to_remove), ''))
 
 # COMMAND ----------
 
 spark_df_silver = spark_df_silver.withColumn('claim_open_or_closed', 
-                           spark_functions.when((spark_df_silver.closed_count == 0), 'open')
+                           sql_functions.when((spark_df_silver.closed_count == 0), 'open')
                            .when((spark_df_silver.closed_count != 0), 'closed')
                           )
 
 # COMMAND ----------
 
-display(spark_df_silver.filter(spark_df_silver.closed_count == 0))
+from pyspark.sql import Window
+w = Window.orderBy(sql_functions.lit('A'))
+claims_with_paid_value = spark_df_silver.filter(spark_df_silver.claim_injury_type != '2. NON-COMP').withColumn("rn", sql_functions.row_number().over(w)).select('claim_identifier', 'rn')
+
+# COMMAND ----------
+
+
+
+# COMMAND ----------
+
+import dbldatagen as dg
+import dbldatagen.distributions as dist
+
+row_count = claims_with_paid_value.count()
+testDataSpec = (dg.DataGenerator(spark, name="test_data_set1", rows=row_count,
+                                 randomSeedMethod='hash_fieldname')
+                .withColumn('paid_loss', "float", minValue=1, maxValue=10000000, random=True, 
+                            distribution=dist.Gamma(5,20))
+                )
+
+dfTestData = testDataSpec.build()
+
+# COMMAND ----------
+
+gammadist_claim_amt_df = dfTestData.withColumn("rn", sql_functions.row_number().over(w))
+
+# COMMAND ----------
+
+claims_with_paid_value_with_id = claims_with_paid_value.join(gammadist_claim_amt_df, claims_with_paid_value.rn == gammadist_claim_amt_df.rn).select(sql_functions.col('claim_identifier'),sql_functions.col('paid_loss'))
+
+# COMMAND ----------
+
+assert claims_with_paid_value_with_id.count() == gammadist_claim_amt_df.count() == claims_with_paid_value.count()
+
+# COMMAND ----------
+
+spark_df_silver = spark_df_silver.join(claims_with_paid_value_with_id, on='claim_identifier', how='left')
+
+# COMMAND ----------
+
+display(spark_df_silver)
+
+# COMMAND ----------
+
+spark_df_silver = spark_df_silver.na.fill(value=0,subset=["paid_loss"])
+
+# COMMAND ----------
+
+assert spark_df_silver.filter(spark_df_silver.claim_injury_type.isNull()).count() == spark_df_silver.filter(spark_df_silver.paid_loss.isNull()).count() == 0
+
+# COMMAND ----------
+
+spark_df_silver = spark_df_silver.withColumn('incurred_loss', sql_functions.when(spark_df_silver.claim_open_or_closed == 'closed', spark_df_silver.paid_loss).when(spark_df_silver.claim_open_or_closed == 'open', spark_df_silver.paid_loss + ((sql_functions.rand(46)+1) * 100000)))
+
+# COMMAND ----------
+
+display(spark_df_silver)
 
 # COMMAND ----------
 
@@ -205,7 +251,7 @@ spark_df_silver.write.format('delta').mode('overwrite').option("overwriteSchema"
 
 # COMMAND ----------
 
-selected_cols = ['accident_date', 'ancr_date', 'age_at_injury', 'average_weekly_wage', 'carrier_name', 'carrier_type', 'claim_injury_type', 'claim_type', 'injured_in_county_name', 'covid_19_indicator', 'current_claim_status', 'gender', 'industry_desc', 'report_lag', 'injured_body_part', 'claim_open_or_closed']
+selected_cols = ['accident_date', 'ancr_date', 'age_at_injury', 'average_weekly_wage', 'carrier_name', 'carrier_type', 'claim_injury_type', 'claim_type', 'injured_in_county_name', 'covid_19_indicator', 'current_claim_status', 'gender', 'industry_desc', 'report_lag', 'injured_body_part', 'claim_open_or_closed', 'paid_loss', 'incurred_loss']
 spark_df_gold = spark_df_silver.select(selected_cols)
 
 # COMMAND ----------
@@ -219,18 +265,19 @@ spark_df_gold.write.format('delta').mode('overwrite').option("overwriteSchema", 
 # COMMAND ----------
 
 # MAGIC %sql
-# MAGIC SELECT COUNT (*) FROM gold_table
+# MAGIC SELECT * from gold_table
 
 # COMMAND ----------
 
 # MAGIC %sql
-# MAGIC SELECT COUNT (*) as Claim_Count_YTD FROM gold_table WHERE ancr_date >= string(year(current_date))
+# MAGIC SELECT MAX(paid_loss) FROM gold_table
 
 # COMMAND ----------
 
 # MAGIC %sql
-# MAGIC WITH ytd_calc(count)
-# MAGIC   AS (SELECT COUNT (*) as Claim_Count_YTD FROM gold_table WHERE ancr_date >= '2022-01-01'),
-# MAGIC ytd_lastyear_calc(count)
-# MAGIC   AS (SELECT COUNT(*) as Claim_Count_Last_Year_YTD FROM gold_table WHERE ancr_date >= string(year(current_date) - 1)  AND ancr_date <= date_sub(current_date, 365))
-# MAGIC SELECT ytd_calc.count, ytd_lastyear_calc.count,  (ytd_calc.count) / ytd_lastyear_calc.count, (ytd_calc.count - ytd_lastyear_calc.count) / ytd_lastyear_calc.count FROM ytd_calc, ytd_lastyear_calc
+# MAGIC SELECT MIN(paid_loss) FROM gold_table
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC SELECT paid_loss FROM gold_table
